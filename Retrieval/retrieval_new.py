@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Dict, List, Literal, Optional, Tuple
+import pathlib
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -2207,8 +2208,6 @@ def create_app():
             "FastAPI not installed. Run: pip install fastapi uvicorn pydantic"
         ) from exc
 
-    # â”€â”€ Pydantic models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     session_history_store: OrderedDict[str, List[Dict[str, str]]] = OrderedDict()
     session_history_lock = Lock()
 
@@ -2256,7 +2255,6 @@ def create_app():
         is_active: Optional[bool] = Field(default=True)
         vector_store_details: Dict[str, Any] = Field(default_factory=dict)
         filters: Optional[Dict[str, Any]] = None
-        point_ids: Optional[List[str]] = None
         include_dense_values: bool = False
         use_cache: bool = True
         session_id: Optional[str] = None
@@ -2507,7 +2505,6 @@ def create_app():
         retrieval_query = original_query
         resolved_session_id = _resolve_retrieval_session_id(body.session_id, request)
 
-        # â”€â”€ LOG: incoming request â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         history_summary = None
         if body.conversation_history:
             history_summary = [
@@ -2530,8 +2527,7 @@ def create_app():
                 {"role": m.role, "content": m.content}
                 for m in body.conversation_history[-CONVERSATION_HISTORY_LIMIT:]
             ]
-
-        # â”€â”€ Smart Query Rewriting Heuristics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       
         needs_rewrite = False
         if prompt_history:
             q_lower = retrieval_query.lower()
@@ -2651,8 +2647,6 @@ def create_app():
             answer=final_answer or "I could not generate an answer.",
         )
 
-    # â”€â”€ App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     async def _process_gupshup_message(
         sender: str,
         message_text: str,
@@ -2692,7 +2686,6 @@ def create_app():
         logger.error("Unhandled exception: %s", exc, exc_info=True)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": str(exc), "error_type": type(exc).__name__})
 
-    # â”€â”€ Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @app.post("/gupshup/whatsapp/webhook", tags=["Channels"])
     async def gupshup_whatsapp_webhook(request: Request) -> Response:
