@@ -1,0 +1,69 @@
+services:
+  rag-ingestion:
+    build:
+      context: .
+      args:
+        REQUIREMENTS_FILE: requirements.txt
+        SYSTEM_DEPS_PROFILE: full
+    container_name: rag-ingestion
+    env_file:
+      - .env
+    environment:
+      REQUEST_JSON: '${REQUEST_JSON}'
+      VECTOR_STORE_ID: '${VECTOR_STORE_ID:-2}'
+    volumes:
+      - ./logs:/app/logs
+      - ./output_files:/app/output_files
+      - ./testfiles:/app/testfiles
+    command: python main.py
+    networks:
+      - rag-network
+
+  retrieval-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.retrieval
+      args:
+        REQUIREMENTS_FILE: requirements-retrieval.txt
+        SYSTEM_DEPS_PROFILE: retrieval
+    container_name: retrieval-api
+    env_file:
+      - .env
+    environment:
+      VECTOR_STORE_ID: '${VECTOR_STORE_ID:-2}'
+    volumes:
+      - ./logs:/app/logs
+      - ./output_files:/app/output_files
+      - ./testfiles:/app/testfiles
+    command: uvicorn retrieval_new:app --host 0.0.0.0 --port 8093
+    ports:
+      - "8093:8093"
+    networks:
+      - rag-network
+
+  rag-ingestion-admin:
+    build:
+      context: ./Doc_ingetion
+    container_name: rag-ingestion-admin
+    env_file:
+      - ./Doc_ingetion/.env
+    environment:
+      VECTOR_STORE_ID: '${VECTOR_STORE_ID:-2}'
+      ADMIN_API_PORT: '${ADMIN_API_PORT:-8094}'
+      UPLOAD_DIR: /app/uploads
+      FILE_REGISTRY_PATH: /app/file_registry/files.json
+    volumes:
+      - ./Doc_ingetion/logs:/app/logs
+      - ./Doc_ingetion/uploads:/app/uploads
+      - ./Doc_ingetion/file_registry:/app/file_registry
+      - ./Doc_ingetion/output_files:/app/output_files
+      - ./Doc_ingetion/testfiles:/app/testfiles
+    command: uvicorn admin_api:app --host 0.0.0.0 --port 8094
+    ports:
+      - "8094:8094"
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge

@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-retrieval.txt .
+RUN pip install --no-cache-dir --default-timeout=300 -r requirements-retrieval.txt
+
+COPY retrieval_new.py .
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+EXPOSE 8093
+
+CMD ["uvicorn", "retrieval_new:app", "--host", "0.0.0.0", "--port", "8093"]
