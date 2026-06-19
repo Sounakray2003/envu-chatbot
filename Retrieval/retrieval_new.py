@@ -166,6 +166,10 @@ class RetrievalResult:
 class RetrievalExecutionError(RuntimeError):
     """Raised when retrieval fails due to backend or connectivity issues."""
 
+
+class OpenAIKeyError(RuntimeError):
+    """Raised when the OpenAI API key is missing, expired, or invalid (HTTP 401/403)."""
+
 # ========================= EMBEDDINGS =========================
 
 def _normalize_model_name(model_name: Optional[str]) -> str:
@@ -244,6 +248,37 @@ def _resolve_openai_embedding_max_retries() -> int:
         return DEFAULT_OPENAI_EMBEDDING_MAX_RETRIES
 
 
+_OPENAI_KEY_ERROR_MESSAGE = (
+    "The OpenAI API key is invalid or has expired. "
+    "Please update the OPENAI_API_KEY in your .env file and restart the service."
+)
+
+
+def _raise_if_openai_auth_error(response: "requests.Response") -> None:
+    """Raise OpenAIKeyError for 401/403 responses, or quota-exhausted 429s, from the OpenAI API."""
+    if response.status_code in {401, 403}:
+        logger.error(
+            "OpenAI API key error (HTTP %s): %s",
+            response.status_code,
+            response.text[:300],
+        )
+        raise OpenAIKeyError(_OPENAI_KEY_ERROR_MESSAGE)
+
+    if response.status_code == 429:
+        try:
+            error_code = (response.json().get("error") or {}).get("code", "")
+        except Exception:
+            error_code = ""
+        if error_code == "insufficient_quota":
+            msg = (
+                "The OpenAI account has exceeded its current quota (billing limit reached). "
+                "Please check your plan and billing details at https://platform.openai.com/account/billing "
+                "and top up your account, then restart the service."
+            )
+            logger.error("OpenAI quota exhausted (HTTP 429 insufficient_quota): %s", response.text[:300])
+            raise OpenAIKeyError(msg)
+
+
 def get_dense_embedding(text: str, model: str = DEFAULT_DENSE_MODEL) -> List[float]:
     requested_model = _normalize_model_name(model)
     resolved_model = _resolve_openai_embedding_model_id()
@@ -289,6 +324,9 @@ def get_dense_embedding(text: str, model: str = DEFAULT_DENSE_MODEL) -> List[flo
                     raise RuntimeError(
                         f"Unexpected OpenAI embeddings response: {response.text[:300]}"
                     ) from exc
+
+            # Expired / invalid key — fail immediately with a clear message
+            _raise_if_openai_auth_error(response)
 
             should_retry = response.status_code in {408, 409, 429, 500, 502, 503, 504}
             if should_retry and attempt < max_retries:
@@ -1120,6 +1158,10 @@ def retrieve(
         print(f"found {len(results)} chunk(s)")
         return results
 
+    except OpenAIKeyError:
+        print(f"ERROR: {_OPENAI_KEY_ERROR_MESSAGE}")
+        logger.error(_OPENAI_KEY_ERROR_MESSAGE)
+        raise
     except Exception as exc:
         message = str(exc)
         print(f"ERROR: {message}")
@@ -1892,6 +1934,9 @@ def _run_openai_chat_completion(
             if resp.ok:
                 break
 
+            # Expired / invalid key — fail immediately with a clear message
+            _raise_if_openai_auth_error(resp)
+
             last_error_text = resp.text[:400]
             unsupported_token_field = (
                 resp.status_code == 400
@@ -2564,6 +2609,15 @@ def create_app():
                     )
                     final_answer = generate_answer_with_openai(augmented)
 
+        except OpenAIKeyError as exc:
+            logger.error(
+                "[retrieve] session_id=%s | OpenAI key error: %s",
+                resolved_session_id, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            )
         except Exception as exc:
             logger.error(
                 "[retrieve] session_id=%s | ERROR: %s",
@@ -2727,4 +2781,3 @@ app = create_app()
 
 if __name__ == "__main__":
     main()
-
