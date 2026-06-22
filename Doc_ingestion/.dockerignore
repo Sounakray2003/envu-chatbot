@@ -1,62 +1,33 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
+# Exclude everything by default; the Dockerfile copies only the runtime API
+# and service package needed for ingestion.
+**
+
+# Runtime source
+!requirements.txt
+!retrieval_new.py
+!admin_api.py
+!services/
+!services/**
+
+# Docker metadata useful during build/debug
+!Dockerfile
+!.dockerignore
+
+# Never include local data, secrets, generated files, or git metadata.
+.env
+.env.*
 .git/
 .github/
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
-venv/
-ENV/
-env/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Logs
+__pycache__/
+*.py[cod]
 logs/
-*.log
-status_log.json
-
-# Environment
-.env
-.env.local
-
-# Docker
-*.tar
-
-# Output
-output/
-markdown_output/
-temp/
 uploads/
-file_registry/
 uploaded_files/
-
-# Secrets
+file_registry/
+output_files/
+testfiles/
+*.pdf
+*.zip
+*.tar
 *.pem
 *.key
-.venv/
-testfiles/
-output_files/

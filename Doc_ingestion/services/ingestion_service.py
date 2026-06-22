@@ -37,6 +37,12 @@ _OPENAI_EMBEDDING_DIMENSIONS = int(
     str(os.getenv("OPENAI_EMBEDDING_DIMENSIONS", "1024")).strip() or "1024"
 )
 _INGESTION_COLLECTION_NAME = "main_memory"
+_MAX_EXTRACTED_CHARS_PER_FILE = int(
+    str(os.getenv("MAX_EXTRACTED_CHARS_PER_FILE", "2000000")).strip() or "2000000"
+)
+_MAX_CHUNKS_PER_JOB = int(
+    str(os.getenv("MAX_CHUNKS_PER_JOB", "1500")).strip() or "1500"
+)
 _SOURCE_LOG_DETAIL_KEYS = (
     "source_mapping_id",
     "source_id",
@@ -383,69 +389,6 @@ class IngestionService:
 
         return f"source_{source_index + 1}"
 
-    async def _discover_sources(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Discover files/documents from all configured sources."""
-        all_files: List[Dict[str, Any]] = []
-        discovery_failures: List[Dict[str, Any]] = []
-
-        for source_index, source_config in enumerate(self.source_details_list):
-            source_type = self._get_source_type_from_config(source_config)
-            source_mapping_id = self._resolve_source_id_from_config(source_config)
-            is_active = self._resolve_source_active_from_config(source_config)
-
-            per_source_request = dict(self.request_data)
-            per_source_request["source_details"] = source_config
-            per_source_request["source_type_name"] = source_type
-            if source_mapping_id is not None:
-                per_source_request["source_mapping_id"] = source_mapping_id
-            per_source_request["isActive"] = is_active
-
-            try:
-                if "api" in source_type:
-                    from services.sources.api_source import APISource
-                    source = APISource(per_source_request)
-                elif "website" in source_type or "web" in source_type:
-                    from services.sources.website_source import WebsiteSource
-                    source = WebsiteSource(per_source_request)
-                else:
-                    from services.sources.folder_source import FolderSource
-                    source = FolderSource(per_source_request)
-
-                discovered_files = await source.discover()
-                for file_info in discovered_files:
-                    if not isinstance(file_info, dict):
-                        continue
-                    file_info.setdefault("source_mapping_id", source_mapping_id)
-                    file_info.setdefault("source_type_name", source_type)
-                    file_info.setdefault("source_type_from_config", source_type)
-                    file_info.setdefault("isActive", is_active)
-                all_files.extend(discovered_files)
-            except Exception as exc:
-                failed_file = self._resolve_discovery_failed_filename(
-                    source_config,
-                    source_type,
-                    source_index,
-                )
-                logger.error(
-                    "[MULTI-SOURCE] Discovery failed | index=%s | source_type=%s | error=%s",
-                    source_index,
-                    source_type,
-                    exc,
-                    exc_info=True,
-                )
-                discovery_failures.append({
-                    "source_mapping_id": source_mapping_id,
-                    "source_type": source_type,
-                    "failed_file": failed_file,
-                    "message": str(exc),
-                    "error": str(exc),
-                })
-
-        if not all_files:
-            logger.warning("[MULTI-SOURCE] No files discovered from any source")
-
-        return all_files, discovery_failures
-
     # =========================================================================
     # MAIN PIPELINE
     # =========================================================================
@@ -581,10 +524,13 @@ class IngestionService:
             logger.info("STEP 2: Extracting content")
             logger.info("=" * 70)
 
-            # Process each file independently so standard documents flow through
-            # extract ? chunk ? embed ? store before the next file starts.
-            await self._extract_content(files, results)
-            logger.info("Per-document extraction and processing complete.")
+            # _extract_content mutates `results` for row-wise files and returns
+            # only the docs that still need chunking → embedding → storing.
+            docs_for_chunking = await self._extract_content(files, results)
+            logger.info(
+                f"Row-wise complete. "
+                f"{len(docs_for_chunking)} doc(s) queued for chunking pipeline."
+            )
 
             # Send extraction completion status with file counts
             if self.status_service:
@@ -600,29 +546,335 @@ class IngestionService:
                     "extraction_complete": True,
                 })
 
-            # If no vectors were stored at all, there was nothing to do.
-            if results['total_vectors_stored'] == 0:
+            # If nothing needs chunking AND no row-wise vectors were stored,
+            # there was nothing to do.
+            if not docs_for_chunking and results['total_vectors_stored'] == 0:
                 logger.warning("No content extracted from any file")
+                # If there are errors, send them to the status sink
                 if results['errors'] and self.status_service:
-                    error_summary = "; ".join(results['errors'][:3])
+                    error_summary = "; ".join(results['errors'][:3])  # First 3 errors
                     self.status_service.send_error(error_summary)
                 return self._finalize_results_status(results)
 
-            return self._finalize_results_status(results)
+            # Skip chunking steps if there are no standard docs to process.
+            if not docs_for_chunking:
+                logger.info(
+                    "All files were row-wise — skipping chunking / embedding steps."
+                )
+
+                # Still emit all pipeline steps so downstream consumers receive
+                # a complete status sequence (steps 3 → 4 → 5).
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("STEP 3: Chunking documents (skipped — row-wise source)")
+                logger.info("=" * 70)
+                if self.status_service:
+                    self.status_service.send_processing_documents({
+                        "step": 3, "total_steps": 5,
+                        "source_mapping_ids": _source_mapping_ids,
+                        "skipped": True,
+                        "reason": "row-wise source; no chunking needed",
+                    })
+
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("STEP 4: Generating embeddings (skipped — row-wise source)")
+                logger.info("=" * 70)
+                if self.status_service:
+                    self.status_service.send_creating_embeddings({
+                        "step": 4, "total_steps": 5,
+                        "source_mapping_ids": _source_mapping_ids,
+                        "skipped": True,
+                        "reason": "row-wise source; embeddings generated inline",
+                    })
+
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("STEP 5: Storing in vector database (complete)")
+                logger.info("=" * 70)
+                if self.status_service:
+                    self.status_service.send_saving_to_knowledge_base({
+                        "step": 5, "total_steps": 5,
+                        "source_mapping_ids": _source_mapping_ids,
+                        "vectors_stored": results['total_vectors_stored'],
+                        "files_processed": results['total_files_processed'],
+                        "files_failed": results['total_files_failed'],
+                        "total_content_size_bytes": results['total_content_size_bytes'],
+                        "processed_files": results['processed_files'],
+                        "failed_files": results['failed_files'],
+                        "completed": True,
+                    })
+
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info("INGESTION COMPLETED SUCCESSFULLY")
+                logger.info("=" * 70)
+
+                return self._finalize_results_status(results)
+
+            # ------------------------------------------------------------------
+            # STEP 3: Chunk
+            # ------------------------------------------------------------------
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STEP 3: Chunking documents")
+            logger.info("=" * 70)
+
+            if self.status_service:
+                self.status_service.send_processing_documents({
+                    "step": 3, "total_steps": 5,
+                    "source_mapping_ids": _source_mapping_ids,
+                    "files_processed": results['total_files_processed'],
+                    "processed_files": results['processed_files'],
+                    "failed_files": results['failed_files'],
+                })
+
+            chunks = await self._chunk_documents(docs_for_chunking)
+            if _MAX_CHUNKS_PER_JOB > 0 and len(chunks) > _MAX_CHUNKS_PER_JOB:
+                raise RuntimeError(
+                    f"Chunk limit exceeded: created {len(chunks)} chunks, "
+                    f"max allowed is {_MAX_CHUNKS_PER_JOB}. Reduce file size "
+                    "or increase MAX_CHUNKS_PER_JOB for a larger worker."
+                )
+            results['total_chunks_created'] += len(chunks)
+            
+            # Track tokens and characters from standard document chunks
+            chunked_tokens = sum(chunk.get('token_count', 0) for chunk in chunks)
+            chunked_chars = sum(chunk.get('char_count', 0) for chunk in chunks)
+            results['total_tokens'] += chunked_tokens
+            results['total_characters'] += chunked_chars
+            
+            logger.info(
+                f"Created {len(chunks)} chunk(s) | "
+                f"{chunked_tokens} tokens | {chunked_chars} characters"
+            )
+
+            if not chunks:
+                logger.warning("No chunks created")
+                return results
+
+            # ------------------------------------------------------------------
+            # STEP 4: Embed
+            # ------------------------------------------------------------------
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STEP 4: Generating embeddings")
+            logger.info("=" * 70)
+
+            if self.status_service:
+                self.status_service.send_creating_embeddings({
+                    "step": 4, "total_steps": 5,
+                    "source_mapping_ids": _source_mapping_ids,
+                    "files_processed": results['total_files_processed'],
+                    "chunks_created": len(chunks),
+                })
+
+            embedded_chunks = await self._generate_embeddings(chunks)
+            logger.info("Generated embeddings for %s chunk(s)", len(embedded_chunks))
+
+            # ------------------------------------------------------------------
+            # STEP 5: Store chunk vectors
+            # ------------------------------------------------------------------
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STEP 5: Storing in vector database")
+            logger.info("=" * 70)
+
+            if self.status_service:
+                self.status_service.send_saving_to_knowledge_base({
+                    "step": 5, "total_steps": 5,
+                    "source_mapping_ids": _source_mapping_ids,
+                    "chunks_to_store": len(embedded_chunks),
+                })
+
+            chunk_vectors_stored = await self._store_vectors(embedded_chunks)
+            results['total_vectors_stored'] += chunk_vectors_stored
+            logger.info(
+                "Stored %s chunk vector(s) in the configured vector store "
+                "(total: %s)",
+                chunk_vectors_stored,
+                results['total_vectors_stored'],
+            )
+
+            if self.status_service:
+                self.status_service.send_saving_to_knowledge_base({
+                    "step": 5, "total_steps": 5,
+                    "source_mapping_ids": _source_mapping_ids,
+                    "vectors_stored": results['total_vectors_stored'],
+                    "files_processed": results['total_files_processed'],
+                    "files_failed": results['total_files_failed'],
+                    "total_content_size_bytes": results['total_content_size_bytes'],
+                    "processed_files": results['processed_files'],
+                    "failed_files": results['failed_files'],
+                    "completed": True,
+                })
+
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("INGESTION COMPLETED SUCCESSFULLY")
+            logger.info("=" * 70)
 
         except Exception as exc:
-            logger.error(f"Ingestion failed: {exc}", exc_info=True)
+            logger.error(f"Ingestion pipeline failed: {exc}", exc_info=True)
             results['status'] = 'FAILED'
             results['errors'].append(str(exc))
             if self.status_service:
-                self.status_service.send_error(str(exc))
-            return results
+                try:
+                    self.status_service.send_error(str(exc))
+                except Exception as status_exc:
+                    logger.error(
+                        "Failed to send FAILED status event: %s",
+                        status_exc,
+                        exc_info=True,
+                    )
+
+        return self._finalize_results_status(results)
+
+    # =========================================================================
+    # STEP IMPLEMENTATIONS
+    # =========================================================================
+
+    async def _discover_sources(self) -> tuple:
+        """Discover files from the configured data source(s).
+        
+        Returns:
+            Tuple of (all_files, discovery_failures) where discovery_failures
+            contains source-aware details from failed discovery attempts.
+        """
+        all_files = []
+        discovery_failures = []
+        
+        # Loop through each source in source_details_list
+        for source_index, source_config in enumerate(self.source_details_list):
+            source_type = "unknown"
+            source_mapping_id = None
+            try:
+                logger.info(f"[MULTI-SOURCE] Discovering source {source_index + 1}/{len(self.source_details_list)}")
+
+                if not isinstance(source_config, dict):
+                    raise ValueError("Source configuration must be an object")
+                
+                # Detect source type for this specific config
+                source_type = self._get_source_type_from_config(source_config)
+                source_mapping_id = self._resolve_source_id_from_config(source_config)
+                source_is_active = self._resolve_source_active_from_config(source_config)
+                logger.info(
+                    "[MULTI-SOURCE] source_index=%s, type=%s, details=%s",
+                    source_index,
+                    source_type,
+                    self._sanitize_source_log_details(source_config),
+                )
+                
+                # Create a request_data variant with just this source
+                request_variant = dict(self.request_data)
+                request_variant['source_details'] = source_config
+                request_variant['source_type_name'] = (
+                    str(source_config.get("source_type_name", "")).strip()
+                    or source_type
+                )
+                request_variant['source_type_id'] = (
+                    source_config.get("source_type_id")
+                    or request_variant.get("source_type_id")
+                )
+                
+                # Route to appropriate handler
+                files = []
+                
+                if "folder" in source_type or "file" in source_type:
+                    from services.sources.folder_source import FolderSource
+                    source = FolderSource(request_variant)
+                    files = await source.discover()
+                
+                elif "website" in source_type or "web" in source_type:
+                    from services.sources.website_source import WebsiteSource
+                    files = await WebsiteSource(request_variant).discover()
+
+                elif "api" in source_type:
+                    from services.sources.api_source import APISource
+                    files = await APISource(request_variant).discover()
+
+                elif "cloud" in source_type or "storage" in source_type:
+                    raise ValueError(
+                        "Cloud storage sources are no longer supported. "
+                        "Use File Upload/Folder or API sources instead."
+                    )
+
+                elif "database" in source_type:
+                    raise ValueError(
+                        "Database sources are no longer supported. "
+                        "Use File Upload/Folder or API sources instead."
+                    )
+                
+                else:
+                    raise ValueError(f"Unsupported source type: {source_type}")
+                
+                # Tag files with source_index for traceability
+                for file_dict in files:
+                    source_details_payload = (
+                        dict(source_config) if isinstance(source_config, dict) else {}
+                    )
+                    if file_dict.get("file_id") not in (None, ""):
+                        source_details_payload["file_id"] = str(file_dict["file_id"])
+
+                    file_dict['source_index'] = source_index
+                    file_dict['source_type_name'] = request_variant['source_type_name']
+                    file_dict['source_type_from_config'] = source_type
+                    file_dict['source_mapping_id'] = source_mapping_id
+                    file_dict['isActive'] = source_is_active
+                    file_dict['source_details'] = source_details_payload
+                
+                logger.info(f"[MULTI-SOURCE] Source {source_index} discovered {len(files)} file(s)")
+                all_files.extend(files)
+
+                # Notify the status sink: this specific source was discovered successfully
+                if self.status_service:
+                    self.status_service.send_preparing_data({
+                        "step": 1,
+                        "total_steps": 5,
+                        "source_mapping_id": source_mapping_id,
+                        "source_type_name": str(source_config.get("source_type_name", source_type)),
+                        "provider_name": source_config.get("provider_name"),
+                        "current_source_index": source_index + 1,
+                        "total_sources": len(self.source_details_list),
+                        "files_discovered": len(files),
+                    })
+
+            except Exception as e:
+                error_msg = str(e)
+                failure_label = self._resolve_discovery_failed_filename(
+                    source_config if isinstance(source_config, dict) else {},
+                    source_type,
+                    source_index,
+                )
+                failure_message = f"Discovery failed for {failure_label}: {error_msg}"
+                logger.error(f"[MULTI-SOURCE] Error discovering source {source_index}: {failure_message}")
+                discovery_failures.append(
+                    {
+                        "source_index": source_index,
+                        "source_type": source_type,
+                        "source_mapping_id": source_mapping_id,
+                        "failed_file": failure_label,
+                        "error": error_msg,
+                        "message": failure_message,
+                    }
+                )
+
+                # Notify the status sink: this specific source failed discovery
+                if self.status_service:
+                    self.status_service.send_error(failure_message)
+
+                continue
+        
+        if not all_files:
+            logger.warning("[MULTI-SOURCE] No files discovered from any source")
+        
+        return all_files, discovery_failures
 
     async def _extract_content(
         self,
         files: List[Dict[str, Any]],
         results: Dict[str, Any],
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         """
         Extract content from all discovered files.
 
@@ -672,7 +924,7 @@ class IngestionService:
         knowledge_base_name = self.request_data.get('name', '')
         user_id = str(self.request_data.get('member_id', ''))
 
-        global_chunk_offset = 0
+        docs_for_chunking: List[Dict[str, Any]] = []
 
         for file_info in files:
             filename  = file_info.get('filename', '')
@@ -712,7 +964,9 @@ class IngestionService:
                             len(extracted_files),
                         )
 
-                        await self._extract_content(extracted_files, results)
+                        docs_for_chunking.extend(
+                            await self._extract_content(extracted_files, results)
+                        )
                     continue
 
                 except Exception as exc:
@@ -817,12 +1071,17 @@ class IngestionService:
                 try:
                     result = await extractor.extract(file_info)
                     if result:
-                        global_chunk_offset = await self._process_standard_documents(
-                            documents=[result],
-                            results=results,
-                            source_mapping_ids=[file_info.get("source_mapping_id")],
-                            chunk_index_offset=global_chunk_offset,
-                        )
+                        content = str(result.get("content") or "")
+                        if (
+                            _MAX_EXTRACTED_CHARS_PER_FILE > 0
+                            and len(content) > _MAX_EXTRACTED_CHARS_PER_FILE
+                        ):
+                            raise ValueError(
+                                f"Extracted content is too large "
+                                f"({len(content)} characters). Max allowed is "
+                                f"{_MAX_EXTRACTED_CHARS_PER_FILE} characters."
+                            )
+                        docs_for_chunking.append(result)
                         results['total_files_processed'] += 1
                         results['processed_files'].append({
                             "filename": filename,
@@ -830,7 +1089,7 @@ class IngestionService:
                         })
                         # Only count size for files successfully extracted into KB
                         results['total_content_size_bytes'] += file_info.get('content_size_bytes', 0)
-                        logger.info(f"Successfully processed '{filename}'")
+                        logger.info(f"Successfully extracted '{filename}'")
                     else:
                         results['total_files_failed'] += 1
                         results['failed_files'].append({
@@ -851,89 +1110,7 @@ class IngestionService:
                     )
                     results['errors'].append(f"{filename}: {exc}")
 
-        return None
-
-    async def _process_standard_documents(
-        self,
-        documents: List[Dict[str, Any]],
-        results: Dict[str, Any],
-        source_mapping_ids: List[Any],
-        chunk_index_offset: int,
-    ) -> int:
-        """Process extracted standard documents through chunking, embedding, and storage."""
-        if not documents:
-            return chunk_index_offset
-
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("STEP 3: Chunking documents")
-        logger.info("=" * 70)
-        if self.status_service:
-            self.status_service.send_processing_documents({
-                "step": 3,
-                "total_steps": 5,
-                "source_mapping_ids": source_mapping_ids,
-                "files_processed": results['total_files_processed'],
-                "processed_files": results['processed_files'],
-                "failed_files": results['failed_files'],
-            })
-
-        chunks = await self._chunk_documents(documents)
-        for chunk in chunks:
-            chunk["chunk_index"] = chunk.get("chunk_index", 0) + chunk_index_offset
-            metadata = chunk.get("metadata")
-            if isinstance(metadata, dict) and "chunk_index" in metadata:
-                metadata["chunk_index"] += chunk_index_offset
-
-        results['total_chunks_created'] += len(chunks)
-        chunked_tokens = sum(chunk.get('token_count', 0) for chunk in chunks)
-        chunked_chars = sum(chunk.get('char_count', 0) for chunk in chunks)
-        results['total_tokens'] += chunked_tokens
-        results['total_characters'] += chunked_chars
-        logger.info(
-            "Created %s chunk(s) for standard documents | +%s tokens | +%s chars",
-            len(chunks),
-            chunked_tokens,
-            chunked_chars,
-        )
-
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("STEP 4: Generating embeddings")
-        logger.info("=" * 70)
-        if self.status_service:
-            self.status_service.send_creating_embeddings({
-                "step": 4,
-                "total_steps": 5,
-                "source_mapping_ids": source_mapping_ids,
-                "files_processed": results['total_files_processed'],
-                "chunks_created": len(chunks),
-            })
-
-        embedded_chunks = await self._generate_embeddings(chunks)
-        logger.info("Generated embeddings for %s chunk(s)", len(embedded_chunks))
-
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("STEP 5: Storing in vector database")
-        logger.info("=" * 70)
-        if self.status_service:
-            self.status_service.send_saving_to_knowledge_base({
-                "step": 5,
-                "total_steps": 5,
-                "source_mapping_ids": source_mapping_ids,
-                "chunks_to_store": len(embedded_chunks),
-            })
-
-        chunk_vectors_stored = await self._store_vectors(embedded_chunks)
-        results['total_vectors_stored'] += chunk_vectors_stored
-        logger.info(
-            "Stored %s chunk vector(s) in the configured vector store (total: %s)",
-            chunk_vectors_stored,
-            results['total_vectors_stored'],
-        )
-
-        return chunk_index_offset + len(chunks)
+        return docs_for_chunking
 
     @staticmethod
     def _finalize_results_status(results: Dict[str, Any]) -> Dict[str, Any]:

@@ -42,10 +42,15 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 # Download NLTK data
 RUN python -c "import nltk; nltk.download('punkt', quiet=True)"
 
-# Copy application code
-COPY . .
+# Copy only runtime files needed by the ingestion API.
+COPY retrieval_new.py ./
+COPY admin_api.py ./
+COPY services ./services
+
+# Temporary upload and registry workspaces used by the ingestion API.
+RUN mkdir -p uploaded_files uploads file_registry
 
 EXPOSE 8094
 
-# Default to the admin ingestion API.
+# Default to the old handoff-compatible admin API.
 CMD ["uvicorn", "admin_api:app", "--host", "0.0.0.0", "--port", "8094"]

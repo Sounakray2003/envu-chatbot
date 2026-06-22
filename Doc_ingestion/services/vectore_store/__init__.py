@@ -7,13 +7,34 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Dict, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 VECTOR_STORE_INTERNAL_QDRANT = 1
 VECTOR_STORE_USER_QDRANT = 2
+
+
+def _read_env_value(key: str) -> Optional[str]:
+    """Read a specific key directly from the local .env file to guarantee it is used."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == key:
+                        val = v.strip()
+                        if val.startswith('"') and val.endswith('"'):
+                            val = val[1:-1]
+                        elif val.startswith("'") and val.endswith("'"):
+                            val = val[1:-1]
+                        return val
+        except Exception:
+            pass
+    return os.getenv(key)
 
 
 def _resolve_vector_store_id(
@@ -43,7 +64,7 @@ def _resolve_qdrant_url(
     vs_details: Dict[str, Any] = request_data.get("vector_store_details") or {}
 
     return (
-        os.getenv("QDRANT_URL")
+        _read_env_value("QDRANT_URL")
         or vs_details.get("QDRANT_URL")
         or vs_details.get("qdrant_url")
         or request_data.get("QDRANT_URL")
@@ -60,7 +81,7 @@ def _resolve_qdrant_api_key(
     vs_details: Dict[str, Any] = request_data.get("vector_store_details") or {}
 
     return (
-        os.getenv("QDRANT_API_KEY")
+        _read_env_value("QDRANT_API_KEY")
         or vs_details.get("QDRANT_API_KEY")
         or vs_details.get("qdrant_api_key")
         or request_data.get("QDRANT_API_KEY")
