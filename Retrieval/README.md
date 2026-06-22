@@ -170,34 +170,6 @@ Open an issue, or drop a message in the repoâ€™s Discussions. Happy building! ðŸ
 
 ---
 
-## Gupshup WhatsApp Integration
-
-The FastAPI app now exposes a Gupshup webhook at `POST /gupshup/whatsapp/webhook`.
-
-Set these environment variables before running the service:
-
-```text
-GUPSHUP_ROUTE_ENABLED=true
-GUPSHUP_DEFAULT_COLLECTION=main_memory
-GUPSHUP_DEFAULT_LIMIT=5
-GUPSHUP_API_KEY=your_gupshup_api_key
-GUPSHUP_APP_NAME=your_gupshup_app_name
-GUPSHUP_SOURCE=your_whatsapp_source_number
-GUPSHUP_SEND_MESSAGE_URL=https://api.gupshup.io/wa/api/v1/msg
-GUPSHUP_HISTORY_STORE_PATH=./data/gupshup_history.json
-GUPSHUP_HISTORY_STORE_LIMIT=10
-```
-
-The optional history store keeps WhatsApp sessions across restarts.
-
-Configure the Gupshup callback/webhook URL to point at:
-
-```text
-https://your-domain.example/gupshup/whatsapp/webhook
-```
-
-Inbound text messages are mapped to a `session_id` using the sender's phone number, and the service acknowledges the webhook quickly before sending the answer back through Gupshup's outbound messaging API.
-
 ## Test the Running Retrieval API
 If the Docker container is already up, confirm the API is healthy:
 
@@ -222,9 +194,3 @@ curl -X POST http://localhost:8093/retrieve -H "Content-Type: application/json" 
 ```
 
 The retrieval API runs at `http://localhost:8093`; opening that URL directly in a browser will not run a query because `/retrieve` expects a POST request.
-
-
-## Operational Endpoints
-
-- `GET /health` ? service status
-- `GET /gupshup/health` ? Gupshup WhatsApp channel status and session-store info

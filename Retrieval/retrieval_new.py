@@ -1,5 +1,5 @@
-﻿"""
-retrieval.py â€” Qdrant RAG Retrieval Pipeline
+"""
+retrieval.py — Qdrant RAG Retrieval Pipeline
 ============================================
 Retrieval is locked to:
   - User-defined Qdrant only (`vector_store_id=2`)
@@ -10,7 +10,6 @@ Retrieval is locked to:
 
 
 import argparse
-import asyncio
 import os
 import json
 import logging
@@ -23,11 +22,9 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 import requests
-from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Dict, List, Literal, Optional, Tuple
-import pathlib
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -56,18 +53,6 @@ CACHE_MEMORY_COLLECTION = "cache_memory"
 DEFAULT_CACHE_SIMILARITY_THRESHOLD = 0.88
 GENERIC_NO_RESULTS_ANSWER = "I could not find any information about this in the knowledge base."
 GENERIC_GENERATION_FAILURE_ANSWER = "I could not generate an answer."
-GUPSHUP_WHATSAPP_HISTORY_LIMIT = 10
-GUPSHUP_ROUTE_ENABLED_ENV = "GUPSHUP_ROUTE_ENABLED"
-GUPSHUP_DEFAULT_COLLECTION_ENV = "GUPSHUP_DEFAULT_COLLECTION"
-GUPSHUP_DEFAULT_LIMIT_ENV = "GUPSHUP_DEFAULT_LIMIT"
-GUPSHUP_API_KEY_ENV = "GUPSHUP_API_KEY"
-GUPSHUP_APP_NAME_ENV = "GUPSHUP_APP_NAME"
-GUPSHUP_SOURCE_ENV = "GUPSHUP_SOURCE"
-GUPSHUP_SEND_MESSAGE_URL_ENV = "GUPSHUP_SEND_MESSAGE_URL"
-GUPSHUP_HISTORY_STORE_PATH_ENV = "GUPSHUP_HISTORY_STORE_PATH"
-GUPSHUP_HISTORY_STORE_LIMIT_ENV = "GUPSHUP_HISTORY_STORE_LIMIT"
-DEFAULT_GUPSHUP_SEND_MESSAGE_URL = "https://api.gupshup.io/wa/api/v1/msg"
-
 ANSWER_PROMPT_VERSION = "envu-representative-v2"
 ENVU_INDIA_SYSTEM_PROMPT = """
 You are an Envu India customer assistance representative.
@@ -152,8 +137,6 @@ DENSE_VECTOR_NAME  = "dense"
 
 # ========================= DATA CLASS =========================
 
-load_dotenv()
-
 @dataclass
 class RetrievalResult:
     score:         float
@@ -166,10 +149,6 @@ class RetrievalResult:
 
 class RetrievalExecutionError(RuntimeError):
     """Raised when retrieval fails due to backend or connectivity issues."""
-
-
-class OpenAIKeyError(RuntimeError):
-    """Raised when the OpenAI API key is missing, expired, or invalid (HTTP 401/403)."""
 
 # ========================= EMBEDDINGS =========================
 
@@ -249,37 +228,6 @@ def _resolve_openai_embedding_max_retries() -> int:
         return DEFAULT_OPENAI_EMBEDDING_MAX_RETRIES
 
 
-_OPENAI_KEY_ERROR_MESSAGE = (
-    "The OpenAI API key is invalid or has expired. "
-    "Please update the OPENAI_API_KEY in your .env file and restart the service."
-)
-
-
-def _raise_if_openai_auth_error(response: "requests.Response") -> None:
-    """Raise OpenAIKeyError for 401/403 responses, or quota-exhausted 429s, from the OpenAI API."""
-    if response.status_code in {401, 403}:
-        logger.error(
-            "OpenAI API key error (HTTP %s): %s",
-            response.status_code,
-            response.text[:300],
-        )
-        raise OpenAIKeyError(_OPENAI_KEY_ERROR_MESSAGE)
-
-    if response.status_code == 429:
-        try:
-            error_code = (response.json().get("error") or {}).get("code", "")
-        except Exception:
-            error_code = ""
-        if error_code == "insufficient_quota":
-            msg = (
-                "The OpenAI account has exceeded its current quota (billing limit reached). "
-                "Please check your plan and billing details at https://platform.openai.com/account/billing "
-                "and top up your account, then restart the service."
-            )
-            logger.error("OpenAI quota exhausted (HTTP 429 insufficient_quota): %s", response.text[:300])
-            raise OpenAIKeyError(msg)
-
-
 def get_dense_embedding(text: str, model: str = DEFAULT_DENSE_MODEL) -> List[float]:
     requested_model = _normalize_model_name(model)
     resolved_model = _resolve_openai_embedding_model_id()
@@ -325,9 +273,6 @@ def get_dense_embedding(text: str, model: str = DEFAULT_DENSE_MODEL) -> List[flo
                     raise RuntimeError(
                         f"Unexpected OpenAI embeddings response: {response.text[:300]}"
                     ) from exc
-
-            # Expired / invalid key — fail immediately with a clear message
-            _raise_if_openai_auth_error(response)
 
             should_retry = response.status_code in {408, 409, 429, 500, 502, 503, 504}
             if should_retry and attempt < max_retries:
@@ -427,7 +372,7 @@ def _qdrant_collection_info(
     base_url: str,
     api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fetch collection schema â€” used to detect vector names and server version."""
+    """Fetch collection schema — used to detect vector names and server version."""
     cache_key = (base_url.rstrip("/"), collection)
     if cache_key in _QDRANT_COLLECTION_INFO_CACHE:
         return _QDRANT_COLLECTION_INFO_CACHE[cache_key]
@@ -657,7 +602,7 @@ def _qdrant_ensure_is_active_index(
     Qdrant Cloud requires an explicit payload index before a boolean field can
     be used in a filter. This is called automatically whenever a 400
     "Index required" error is detected so the retry succeeds with the filter
-    intact â€” isActive filtering is never silently dropped.
+    intact — isActive filtering is never silently dropped.
 
     Tries both known endpoint variants:
       PUT /collections/{name}/index           (Qdrant v1.x / Cloud)
@@ -671,7 +616,7 @@ def _qdrant_ensure_is_active_index(
     ]
     for url in endpoints:
         print(
-            f"  [qdrant-debug] Creating isActive payload index â€” PUT {url}",
+            f"  [qdrant-debug] Creating isActive payload index — PUT {url}",
             flush=True,
         )
         try:
@@ -687,7 +632,7 @@ def _qdrant_ensure_is_active_index(
                 )
                 return True
             elif resp.status_code == 404:
-                # This endpoint variant doesn't exist â€” try the next one
+                # This endpoint variant doesn't exist — try the next one
                 logger.debug("Qdrant index endpoint not found: %s", url)
                 continue
             else:
@@ -695,7 +640,7 @@ def _qdrant_ensure_is_active_index(
                     "Qdrant: failed to create isActive index via %s (%d): %s",
                     url, resp.status_code, resp.text[:200],
                 )
-                # Non-404 failure â€” still try next variant
+                # Non-404 failure — still try next variant
                 continue
         except Exception as exc:
             logger.warning("Qdrant: error calling %s: %s", url, exc)
@@ -719,14 +664,14 @@ def _qdrant_search_with_query_api(
     Use the Qdrant v1.10+ /points/query endpoint.
 
     If the filter causes a 400 "Index required" error, automatically creates
-    the payload index on 'isActive' and retries â€” ensuring isActive filtering
+    the payload index on 'isActive' and retries — ensuring isActive filtering
     always works without manual index setup.
     """
     url = f"{base_url}/collections/{collection}/points/query"
     _qdrant_log_request(url, headers, payload)
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
 
-    # â”€â”€ Auto-create index + retry on "Index required" 400 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Auto-create index + retry on "Index required" 400 ─────────────────
     if resp.status_code == 400:
         body = resp.text
         if "index required" in body.lower() or "payload index" in body.lower():
@@ -775,7 +720,7 @@ def _qdrant_search_with_search_api(
     _qdrant_log_request(url, headers, payload)
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
 
-    # â”€â”€ Auto-create index + retry on "Index required" 400 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Auto-create index + retry on "Index required" 400 ─────────────────
     if resp.status_code == 400:
         body = resp.text
         if "index required" in body.lower() or "payload index" in body.lower():
@@ -832,37 +777,21 @@ def _qdrant_search_dense(
         )
 
     payload: dict = {
-        "query":           vector,
+        "query":           {"nearest": vector},   # /points/query requires wrapped format
+        "using":           dense_name,
         "limit":           limit,
         "with_payload":    True,
         "score_threshold": score_threshold,
     }
-    if dense_name:
-        payload["using"] = dense_name
     if qdrant_filter is not None:
         payload["filter"] = qdrant_filter
 
     try:
         return _qdrant_search_with_query_api(base_url, collection, headers, payload)
     except requests.exceptions.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code in {400, 404, 405}:
-            response_text = (exc.response.text or "").lower()
-            should_fallback = exc.response.status_code in {404, 405} or any(
-                marker in response_text
-                for marker in (
-                    "unknown variant",
-                    "format error",
-                    "invalid query",
-                    "missing",
-                    "vector params are not specified",
-                    "not existing vector name",
-                )
-            )
-            if not should_fallback:
-                raise
+        if exc.response is not None and exc.response.status_code in {404, 405}:
             logger.warning(
-                "Qdrant /query request failed for dense search (status=%s). Falling back to legacy /search API.",
-                exc.response.status_code,
+                "Qdrant /query endpoint not found (404/405) for dense search. Falling back to legacy /search API."
             )
             legacy_payload = {
                 "vector":          {"name": dense_name, "vector": vector} if dense_name else vector,
@@ -874,6 +803,7 @@ def _qdrant_search_dense(
                 legacy_payload["filter"] = qdrant_filter
             return _qdrant_search_with_search_api(base_url, collection, headers, legacy_payload)
         raise
+
 
 # ========================= BACKEND ROUTER =========================
 
@@ -1096,7 +1026,7 @@ def retrieve(
     dense_model          : accepted for compatibility; normalized to the configured OpenAI embedding model
     env                  : retained for compatibility; user-defined QDRANT_URL is required
     limit                : number of results to return
-    score_threshold      : minimum similarity score (0â€“1)
+    score_threshold      : minimum similarity score (0–1)
     is_active            : filter on isActive flag (True/False/None for no filter)
     vector_store_details : dict from request_data["vector_store_details"]
     filters              : additional backend-specific filter dict
@@ -1159,10 +1089,6 @@ def retrieve(
         print(f"found {len(results)} chunk(s)")
         return results
 
-    except OpenAIKeyError:
-        print(f"ERROR: {_OPENAI_KEY_ERROR_MESSAGE}")
-        logger.error(_OPENAI_KEY_ERROR_MESSAGE)
-        raise
     except Exception as exc:
         message = str(exc)
         print(f"ERROR: {message}")
@@ -1614,7 +1540,7 @@ def build_augmented_user_message(
     ``CONVERSATION_HISTORY_LIMIT`` messages are prepended so the LLM can
     resolve follow-up questions.
     """
-    # â”€â”€ conversation history block â”€â”€
+    # ── conversation history block ──
     history_block = ""
     if conversation_history:
         trimmed = conversation_history[-CONVERSATION_HISTORY_LIMIT:]
@@ -1653,60 +1579,12 @@ def build_augmented_user_message(
         f"Question: {question}"
     )
 
-def _sanitize_qdrant_filter(filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Drop invalid placeholder keys and keep valid Qdrant filter structure."""
-    if not isinstance(filters, dict):
-        return filters
-
-    valid_branch_keys = {"must", "should", "must_not", "min_should"}
-    valid_condition_keys = {
-        "key", "match", "range", "geo_bounding_box", "geo_radius",
-        "geo_polygon", "values_count", "is_empty", "is_null",
-        "has_id", "nested", "filter"
-    }
-
-    def _clean(node: Any) -> Any:
-        if isinstance(node, list):
-            cleaned_items = []
-            for item in node:
-                cleaned = _clean(item)
-                if cleaned not in (None, {}, []):
-                    cleaned_items.append(cleaned)
-            return cleaned_items
-
-        if not isinstance(node, dict):
-            return node
-
-        if "additionalProp1" in node:
-            logger.warning("Dropping invalid Qdrant filter placeholder key 'additionalProp1'.")
-
-        branch_subset = {key: node.get(key) for key in valid_branch_keys if key in node}
-        if branch_subset:
-            cleaned_branch: Dict[str, Any] = {}
-            for key, value in branch_subset.items():
-                cleaned_value = _clean(value)
-                if cleaned_value not in (None, {}, []):
-                    cleaned_branch[key] = cleaned_value
-            return cleaned_branch
-
-        cleaned_condition: Dict[str, Any] = {}
-        for key, value in node.items():
-            if key == "additionalProp1":
-                continue
-            if key in valid_condition_keys:
-                cleaned_condition[key] = _clean(value)
-        return cleaned_condition
-
-    cleaned_filters = _clean(filters)
-    return cleaned_filters if isinstance(cleaned_filters, dict) and cleaned_filters else None
-
 
 def _merge_filter_conditions(
     filters: Optional[Dict[str, Any]],
     required_conditions: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     """Merge required `must` conditions into an existing Qdrant filter."""
-    filters = _sanitize_qdrant_filter(filters)
     if not required_conditions:
         return filters
 
@@ -1935,9 +1813,6 @@ def _run_openai_chat_completion(
             if resp.ok:
                 break
 
-            # Expired / invalid key — fail immediately with a clear message
-            _raise_if_openai_auth_error(resp)
-
             last_error_text = resp.text[:400]
             unsupported_token_field = (
                 resp.status_code == 400
@@ -2071,7 +1946,7 @@ def main():
         choices=[USER_DEFINED_QDRANT_BACKEND_ID],
         help="Retrieval always uses user-defined Qdrant (vector_store_id=2).",
     )
-    # Individual credential flags â€” avoids PowerShell JSON quoting issues.
+    # Individual credential flags — avoids PowerShell JSON quoting issues.
     # These are merged into vs_details after parsing.
     parser.add_argument("--vector-store-details", default=None,
                         help="JSON string (Linux/Mac). On Windows prefer the flags below.")
@@ -2096,7 +1971,7 @@ def main():
 
     vs_details: Dict[str, Any] = {"vector_store_id": args.vector_store_id}
 
-    # 1. JSON blob (Linux/Mac style) â€” strip PowerShell stray quotes if present
+    # 1. JSON blob (Linux/Mac style) — strip PowerShell stray quotes if present
     if args.vector_store_details:
         try:
             raw = args.vector_store_details.strip().strip("'")
@@ -2104,7 +1979,7 @@ def main():
         except json.JSONDecodeError as exc:
             parser.error(f"--vector-store-details must be valid JSON: {exc}")
 
-    # 2. Individual flags (Windows-friendly) â€” each flag maps to its credential key.
+    # 2. Individual flags (Windows-friendly) — each flag maps to its credential key.
     #    These overlay any value set via --vector-store-details.
     _flag_map = {
         "qdrant_url":         "QDRANT_URL",
@@ -2119,7 +1994,7 @@ def main():
         USER_DEFINED_QDRANT_BACKEND_ID: "Qdrant (user-provided)",
     }
 
-    print(f"\nðŸš€ Qdrant RAG Pipeline | Mode: {args.search_mode.upper()}")
+    print(f"\n🚀 Qdrant RAG Pipeline | Mode: {args.search_mode.upper()}")
     print(f"Backend    : {backend_labels.get(args.vector_store_id, '?')} (id={args.vector_store_id})")
     print(f"Collection : {args.collection}")
     print(f"Dense      : {args.embed_model}")
@@ -2208,37 +2083,10 @@ def create_app():
             "FastAPI not installed. Run: pip install fastapi uvicorn pydantic"
         ) from exc
 
+    # ── Pydantic models ────────────────────────────────────────────────────
+
     session_history_store: OrderedDict[str, List[Dict[str, str]]] = OrderedDict()
     session_history_lock = Lock()
-
-    gupshup_route_enabled = str(
-        os.getenv(GUPSHUP_ROUTE_ENABLED_ENV, "true")
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    gupshup_default_collection = str(
-        os.getenv(GUPSHUP_DEFAULT_COLLECTION_ENV, MAIN_MEMORY_COLLECTION)
-    ).strip() or MAIN_MEMORY_COLLECTION
-    try:
-        gupshup_default_limit = int(
-            str(os.getenv(GUPSHUP_DEFAULT_LIMIT_ENV, "5")).strip() or "5"
-        )
-    except ValueError:
-        gupshup_default_limit = 5
-    gupshup_api_key = str(os.getenv(GUPSHUP_API_KEY_ENV, "")).strip()
-    gupshup_app_name = str(os.getenv(GUPSHUP_APP_NAME_ENV, "")).strip()
-    gupshup_source = str(os.getenv(GUPSHUP_SOURCE_ENV, "")).strip()
-    gupshup_send_message_url = str(
-        os.getenv(GUPSHUP_SEND_MESSAGE_URL_ENV, DEFAULT_GUPSHUP_SEND_MESSAGE_URL)
-    ).strip() or DEFAULT_GUPSHUP_SEND_MESSAGE_URL
-    gupshup_history_store_path = str(
-        os.getenv(GUPSHUP_HISTORY_STORE_PATH_ENV, "").strip()
-    )
-    try:
-        gupshup_history_store_limit = int(
-            str(os.getenv(GUPSHUP_HISTORY_STORE_LIMIT_ENV, str(GUPSHUP_WHATSAPP_HISTORY_LIMIT))).strip()
-            or str(GUPSHUP_WHATSAPP_HISTORY_LIMIT)
-        )
-    except ValueError:
-        gupshup_history_store_limit = GUPSHUP_WHATSAPP_HISTORY_LIMIT
 
     class ConversationMessage(BaseModel):
         role: Literal["user", "assistant"]
@@ -2255,6 +2103,7 @@ def create_app():
         is_active: Optional[bool] = Field(default=True)
         vector_store_details: Dict[str, Any] = Field(default_factory=dict)
         filters: Optional[Dict[str, Any]] = None
+        point_ids: Optional[List[str]] = None
         include_dense_values: bool = False
         use_cache: bool = True
         session_id: Optional[str] = None
@@ -2312,161 +2161,6 @@ def create_app():
         detail:     str
         error_type: Optional[str] = None
 
-    def _load_persistent_gupshup_history() -> None:
-        if not gupshup_history_store_path:
-            return
-        history_path = Path(gupshup_history_store_path)
-        if not history_path.exists():
-            return
-        try:
-            payload = json.loads(history_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                with session_history_lock:
-                    session_history_store.clear()
-                    for key, value in payload.items():
-                        if isinstance(key, str) and isinstance(value, list):
-                            session_history_store[key] = [
-                                item for item in value
-                                if isinstance(item, dict) and item.get("role") in {"user", "assistant"} and item.get("content")
-                            ][-gupshup_history_store_limit:]
-        except Exception as exc:
-            logger.warning("[gupshup] Failed to load history store: %s", exc)
-
-    def _save_persistent_gupshup_history() -> None:
-        if not gupshup_history_store_path:
-            return
-        history_path = Path(gupshup_history_store_path)
-        history_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with session_history_lock:
-                payload = dict(session_history_store)
-            history_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as exc:
-            logger.warning("[gupshup] Failed to save history store: %s", exc)
-
-    def _trim_gupshup_reply(text: str, limit: int = 1500) -> str:
-        value = str(text or "").strip()
-        if len(value) <= limit:
-            return value
-        return value[: max(0, limit - 3)].rstrip() + "..."
-
-    def _normalize_phone_number(value: Any) -> str:
-        return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-    def _gupshup_ready() -> tuple[bool, Optional[str]]:
-        if not gupshup_route_enabled:
-            return False, "Gupshup route is disabled"
-        if not gupshup_api_key:
-            return False, f"{GUPSHUP_API_KEY_ENV} is required"
-        if not gupshup_app_name:
-            return False, f"{GUPSHUP_APP_NAME_ENV} is required"
-        if not gupshup_source:
-            return False, f"{GUPSHUP_SOURCE_ENV} is required"
-        return True, None
-
-    def _extract_gupshup_text_payload(event_payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        payload = event_payload.get("payload")
-        if not isinstance(payload, dict):
-            return None
-        if str(event_payload.get("type") or "").strip().lower() != "message":
-            return None
-        if str(payload.get("type") or "").strip().lower() != "text":
-            return None
-
-        sender_info = payload.get("sender")
-        sender = ""
-        if isinstance(sender_info, dict):
-            sender = _normalize_phone_number(
-                sender_info.get("phone")
-                or sender_info.get("id")
-                or sender_info.get("source")
-            )
-        if not sender:
-            sender = _normalize_phone_number(payload.get("source"))
-        text_value = str((payload.get("payload") or {}).get("text") or "").strip()
-        message_id = str(payload.get("id") or event_payload.get("id") or "").strip()
-        if not sender or not text_value:
-            return None
-        return {
-            "sender": sender,
-            "text": text_value,
-            "message_id": message_id,
-        }
-
-    async def _parse_gupshup_webhook_payload(request: Request) -> Dict[str, Any]:
-        try:
-            event_payload = await request.json()
-            if isinstance(event_payload, dict):
-                return event_payload
-        except Exception:
-            pass
-
-        form = await request.form()
-        payload_field = form.get("payload")
-        if payload_field:
-            try:
-                decoded_payload = json.loads(str(payload_field))
-                if isinstance(decoded_payload, dict):
-                    return decoded_payload
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid Gupshup payload field: {exc}",
-                ) from exc
-
-        form_dict = dict(form)
-        if isinstance(form_dict, dict) and form_dict:
-            return form_dict
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Gupshup webhook payload",
-        )
-
-    def _send_gupshup_text_message(destination: str, message_text: str) -> None:
-        normalized_destination = _normalize_phone_number(destination)
-        normalized_source = _normalize_phone_number(gupshup_source)
-        if not normalized_destination:
-            raise ValueError("A valid destination phone number is required")
-        if not normalized_source:
-            raise ValueError("A valid Gupshup source phone number is required")
-
-        response = requests.post(
-            gupshup_send_message_url,
-            headers={"apikey": gupshup_api_key},
-            data={
-                "channel": "whatsapp",
-                "source": normalized_source,
-                "destination": normalized_destination,
-                "src.name": gupshup_app_name,
-                "message": json.dumps(
-                    {
-                        "type": "text",
-                        "text": _trim_gupshup_reply(message_text),
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-
-    def _get_session_history(session_id: str) -> List[ConversationMessage]:
-        if not session_id:
-            return []
-        with session_history_lock:
-            history = list(session_history_store.get(session_id, []))
-        return [ConversationMessage(role=item["role"], content=item["content"]) for item in history]
-
-    def _append_session_history(session_id: str, role: str, content: str) -> None:
-        if not session_id or not str(content or "").strip():
-            return
-        with session_history_lock:
-            history = list(session_history_store.get(session_id, []))
-            history.append({"role": role, "content": str(content).strip()})
-            session_history_store[session_id] = history[-gupshup_history_store_limit:]
-        _save_persistent_gupshup_history()
-
     def _resolve_similarity_threshold(
         body: RetrieveRequest,
         vector_store_details: Dict[str, Any],
@@ -2505,6 +2199,7 @@ def create_app():
         retrieval_query = original_query
         resolved_session_id = _resolve_retrieval_session_id(body.session_id, request)
 
+        # ── LOG: incoming request ──────────────────────────────────────────
         history_summary = None
         if body.conversation_history:
             history_summary = [
@@ -2527,7 +2222,8 @@ def create_app():
                 {"role": m.role, "content": m.content}
                 for m in body.conversation_history[-CONVERSATION_HISTORY_LIMIT:]
             ]
-       
+
+        # ── Smart Query Rewriting Heuristics ───────────────────────────────
         needs_rewrite = False
         if prompt_history:
             q_lower = retrieval_query.lower()
@@ -2565,7 +2261,7 @@ def create_app():
                     query_vector=query_vector,
                 )
 
-                # â”€â”€ LOG: retrieved documents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── LOG: retrieved documents ───────────────────────────────
                 logger.info(
                     "[retrieve] session_id=%s | retrieved_docs=%d",
                     resolved_session_id,
@@ -2596,7 +2292,7 @@ def create_app():
                         raw_results,
                         conversation_history=prompt_history,
                     )
-                    # â”€â”€ LOG: constructed prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    # ── LOG: constructed prompt ────────────────────────────
                     logger.info(
                         "[retrieve] session_id=%s | prompt_length=%d | prompt_preview=%s",
                         resolved_session_id,
@@ -2605,26 +2301,20 @@ def create_app():
                     )
                     final_answer = generate_answer_with_openai(augmented)
 
-        except OpenAIKeyError as exc:
-            logger.error(
-                "[retrieve] session_id=%s | OpenAI key error: %s",
-                resolved_session_id, exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(exc),
-            )
         except Exception as exc:
             logger.error(
                 "[retrieve] session_id=%s | ERROR: %s",
                 resolved_session_id, exc, exc_info=True,
             )
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="I'm having trouble searching the knowledge base right now. Please try again in a moment.",
+            )
 
         latency_ms = (time.perf_counter() - start) * 1000
         chunks = [ChunkResult(point_id=r.point_id, score=round(r.score, 6), text=r.text, metadata=r.metadata) for r in raw_results]
 
-        # â”€â”€ LOG: final answer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── LOG: final answer ──────────────────────────────────────────────
         logger.info(
             "[retrieve] session_id=%s | latency_ms=%.1f | answer_preview=%s",
             resolved_session_id,
@@ -2647,35 +2337,7 @@ def create_app():
             answer=final_answer or "I could not generate an answer.",
         )
 
-    async def _process_gupshup_message(
-        sender: str,
-        message_text: str,
-        message_id: str,
-    ) -> None:
-        session_id = f"gupshup:{sender}" if sender else (message_id or str(uuid.uuid4()))
-        try:
-            history = _get_session_history(session_id)
-            retrieve_body = RetrieveRequest(
-                query=message_text,
-                collection=gupshup_default_collection,
-                limit=gupshup_default_limit,
-                session_id=session_id,
-                conversation_history=history or None,
-            )
-            response_payload = await _execute_retrieve(retrieve_body, None)
-            _append_session_history(session_id, "user", message_text)
-            _append_session_history(session_id, "assistant", response_payload.answer)
-            _send_gupshup_text_message(sender, response_payload.answer or GENERIC_GENERATION_FAILURE_ANSWER)
-        except Exception as exc:
-            logger.error(
-                "[gupshup] sender=%s message_id=%s ERROR: %s",
-                sender,
-                message_id,
-                exc,
-                exc_info=True,
-            )
-
-    _load_persistent_gupshup_history()
+    # ── App ────────────────────────────────────────────────────────────────
 
     app = FastAPI(title="RAG Retrieval API", version="1.0.0")
 
@@ -2686,65 +2348,11 @@ def create_app():
         logger.error("Unhandled exception: %s", exc, exc_info=True)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": str(exc), "error_type": type(exc).__name__})
 
+    # ── Endpoints ──────────────────────────────────────────────────────────
 
-    @app.post("/gupshup/whatsapp/webhook", tags=["Channels"])
-    async def gupshup_whatsapp_webhook(request: Request) -> Response:
-        """Receive inbound Gupshup WhatsApp messages and answer via the retrieval pipeline."""
-        ready, error_message = _gupshup_ready()
-        if not ready:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=error_message)
-
-        event_payload = await _parse_gupshup_webhook_payload(request)
-
-        text_payload = _extract_gupshup_text_payload(event_payload)
-        if text_payload is not None:
-            asyncio.create_task(
-                _process_gupshup_message(
-                    sender=text_payload["sender"],
-                    message_text=text_payload["text"],
-                    message_id=text_payload["message_id"],
-                )
-            )
-
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @app.get("/gupshup/health", tags=["Channels"])
-    async def gupshup_health_check() -> JSONResponse:
-        with session_history_lock:
-            active_sessions = len(session_history_store)
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "ok",
-                "channel": "gupshup_whatsapp",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "route_enabled": gupshup_route_enabled,
-                "api_key_present": bool(gupshup_api_key),
-                "app_name": gupshup_app_name or None,
-                "source": _normalize_phone_number(gupshup_source) or None,
-                "send_message_url": gupshup_send_message_url,
-                "history_store_path": gupshup_history_store_path or None,
-                "active_sessions": active_sessions,
-                "history_limit": gupshup_history_store_limit,
-            },
-        )
-
-    @app.get("/health", tags=["Health"])
-    async def health_check() -> JSONResponse:
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "ok",
-                "service": "q0_knowledge_base",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "gupshup_route_enabled": gupshup_route_enabled,
-                "gupshup_api_key_present": bool(gupshup_api_key),
-                "gupshup_app_name": gupshup_app_name or None,
-                "gupshup_source": _normalize_phone_number(gupshup_source) or None,
-                "gupshup_history_store_path": gupshup_history_store_path or None,
-                "gupshup_history_store_limit": gupshup_history_store_limit,
-            },
-        )
+    @app.get("/retrieve/health", tags=["Health"])
+    async def retrieve_health() -> Dict[str, str]:
+        return {"status": "ok", "service": "rag-retrieval"}
 
     @app.post("/retrieve", response_model=RetrieveResponse, tags=["Retrieval"])
     async def retrieve_chunks(request: Request, body: RetrieveRequest) -> Response:
@@ -2764,6 +2372,8 @@ def create_app():
         full_resp = await _execute_retrieve(body, request)
 
         return JSONResponse(content=full_resp.dict())
+
+# Semantic cache endpoint removed (cache not supported)
 
     return app
 
