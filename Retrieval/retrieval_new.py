@@ -1,4 +1,4 @@
-"""
+﻿"""
 retrieval.py — Qdrant RAG Retrieval Pipeline
 ============================================
 Retrieval is locked to:
@@ -13,7 +13,7 @@ import argparse
 import os
 import json
 import logging
-from fastapi import FastAPI, HTTPException, Request, status, Response
+from fastapi import FastAPI, HTTPException, Request, status, Response, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import re
@@ -1891,7 +1891,7 @@ def _rewrite_query_with_openai(query: str, history: List[dict]) -> str:
     """Rewrite follow-up questions using minimal context and tokens."""
     recent_history = history[-2:]
     history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in recent_history])
-    
+
     system_prompt = (
         "You rewrite conversational questions into standalone search queries. "
         "Use the chat history for context. If the current question is a greeting, "
@@ -1900,7 +1900,7 @@ def _rewrite_query_with_openai(query: str, history: List[dict]) -> str:
         "rewritten query, nothing else."
     )
     user_prompt = f"History:\n{history_text}\n\nCurrent Question: {query}"
-    
+
     try:
         rewritten = _run_openai_chat_completion(
             system_prompt=system_prompt,
@@ -1946,8 +1946,6 @@ def main():
         choices=[USER_DEFINED_QDRANT_BACKEND_ID],
         help="Retrieval always uses user-defined Qdrant (vector_store_id=2).",
     )
-    # Individual credential flags — avoids PowerShell JSON quoting issues.
-    # These are merged into vs_details after parsing.
     parser.add_argument("--vector-store-details", default=None,
                         help="JSON string (Linux/Mac). On Windows prefer the flags below.")
     parser.add_argument("--qdrant-url",    default=None, help="Qdrant: QDRANT_URL")
@@ -1971,7 +1969,6 @@ def main():
 
     vs_details: Dict[str, Any] = {"vector_store_id": args.vector_store_id}
 
-    # 1. JSON blob (Linux/Mac style) — strip PowerShell stray quotes if present
     if args.vector_store_details:
         try:
             raw = args.vector_store_details.strip().strip("'")
@@ -1979,8 +1976,6 @@ def main():
         except json.JSONDecodeError as exc:
             parser.error(f"--vector-store-details must be valid JSON: {exc}")
 
-    # 2. Individual flags (Windows-friendly) — each flag maps to its credential key.
-    #    These overlay any value set via --vector-store-details.
     _flag_map = {
         "qdrant_url":         "QDRANT_URL",
         "qdrant_api_key":     "QDRANT_API_KEY",
@@ -2058,11 +2053,36 @@ def main():
         messages.append({"role": "assistant", "content": final_answer})
 
 
-# ========================= QDRANT SEMANTIC CACHING HELPERS =========================
-
 # ========================= FASTAPI APP =========================
 
-# Removed broken create_app definition
+# ── Default example payload shown in Swagger UI (/docs) ───────────────────────
+_DEFAULT_RETRIEVE_EXAMPLE = {
+    "query": "where do i get reward listing in pest expert 360 app?",
+    "session_id": "chat_275_20260604162813_7974",
+    "collection": "main_memory",
+    "mode": "dense",
+    "limit": 5,
+    "score_threshold": 0.35,
+    "dense_model": "text-embedding-3-large",
+    "env": "uat",
+    "is_active": True,
+    "use_cache": False,
+    "stream": False,
+    "filters": None,
+    "point_ids": None,
+    "include_dense_values": False,
+    "resolve_references": True,
+    "reset_history": False,
+    "previous_query": None,
+    "previous_answer": None,
+    "conversation_history": [],
+    "cache_collection": "cache_memory",
+    "vector_store_details": {
+        "QDRANT_URL": "https://2a0eed12-73fb-4333-98ef-854d96fdd68e.us-east-1-1.aws.cloud.qdrant.io",
+        "vector_store_id": 2,
+    },
+}
+
 
 def create_app():
     """
@@ -2299,7 +2319,8 @@ def create_app():
                         len(augmented),
                         augmented[:300].replace("\n", " "),
                     )
-                    final_answer = generate_answer_with_openai(augmented)
+
+                final_answer = generate_answer_with_openai(augmented)
 
         except Exception as exc:
             logger.error(
@@ -2341,12 +2362,21 @@ def create_app():
 
     app = FastAPI(title="RAG Retrieval API", version="1.0.0")
 
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.exception_handler(Exception)
     async def _global_exc_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error("Unhandled exception: %s", exc, exc_info=True)
-        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": str(exc), "error_type": type(exc).__name__})
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": str(exc), "error_type": type(exc).__name__},
+        )
 
     # ── Endpoints ──────────────────────────────────────────────────────────
 
@@ -2355,15 +2385,28 @@ def create_app():
         return {"status": "ok", "service": "rag-retrieval"}
 
     @app.post("/retrieve", response_model=RetrieveResponse, tags=["Retrieval"])
-    async def retrieve_chunks(request: Request, body: RetrieveRequest) -> Response:
+    async def retrieve_chunks(
+        request: Request,
+        body: RetrieveRequest = Body(
+            openapi_examples={
+                "default": {
+                    "summary": "Default payload",
+                    "description": "Ready-to-use default payload. Change `query` and `session_id` as needed.",
+                    "value": _DEFAULT_RETRIEVE_EXAMPLE,
+                }
+            }
+        ),
+    ) -> Response:
         """Retrieve relevant chunks and generate an answer.
 
-        Minimal required payload::
+        The request body is pre-filled in Swagger UI with a working default
+        payload. At minimum, update **query** and **session_id** before
+        executing.
 
-            {"query": "your question"}
+        Required fields (everything else has a server-side default):
 
-        Optional fields: ``session_id``, ``conversation_history``.
-        All other parameters have sensible server-side defaults.
+        - **query** – the user's question
+        - **vector_store_details.QDRANT_URL** – your Qdrant cluster URL
         """
         # Trim conversation history to the configured limit
         if body.conversation_history:
@@ -2373,12 +2416,10 @@ def create_app():
 
         return JSONResponse(content=full_resp.dict())
 
-# Semantic cache endpoint removed (cache not supported)
-
     return app
 
 
-# Expose module-level `app` so  uvicorn retrieval_new:app  works directly
+# Expose module-level `app` so  uvicorn retrieval:app  works directly
 app = create_app()
 
 
